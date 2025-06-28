@@ -5,7 +5,7 @@ Zheer Kejlberg Al-Mashhadi
 
 ## Summary
 
-Just a bunch of simulations of all sorts of stuff I've come across and wondered about (let's be honest, usually it's been because someone said something wrong on Twitter and I needed to set the record straight).
+Just a bunch of simulations of all sorts of stuff I've come across and wondered about.
 
 Descriptions follow.
 
