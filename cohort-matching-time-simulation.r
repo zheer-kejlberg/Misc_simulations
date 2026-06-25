@@ -15,15 +15,15 @@ simulate_data <- function(n_t2d = 20000, n_non_t2d = 200000,
                           end_date = as.Date('2024-12-31'),
                           death_rate = 3/1000, aid_rate = 1/100,
                           death_IRR = 1.5, aid_IRR = 1.2,
-                          min_age = 18,
-                          post_T2D_quarantine = 365.25/2) {
+                          min_age = 18) {
   n <- n_t2d + n_non_t2d
   data <- tibble(
+    end_of_study = end_date,
     id = 1:n,
     sex = rbinom(n, 1, 0.5), # Random sex
     high_risk = rbinom(n, 1, 0.3), # Random high-risk status
     T2D_diagnosis_date = c(
-        sample(seq(start_date, end_date, by="day"), n_t2d, replace=T), 
+        sample(seq(start_date, end_date, by="day"), n_t2d, replace = T), 
         rep(NA, n_non_t2d)
     ), # Random T2D diagnosis dates for T2D group, NA for non-T2D group
     birth_date = c(
@@ -34,7 +34,7 @@ simulate_data <- function(n_t2d = 20000, n_non_t2d = 200000,
     AID_date = birth_date + 20*365.25 + rexp(n, rate = aid_rate * 1.5^high_risk) * 365.25, # Time to AID diagnosis follows an exponential distribution
     death_date = birth_date + 50*365.25 + rexp(n, rate = death_rate * 1.5^high_risk) * 365.25 # Time to death follows an exponential distribution
   ) |>
-  filter(is.na(T2D_diagnosis_date) | (T2D_diagnosis_date < pmin(AID_date, death_date, end_date, na.rm =T))) |>
+  filter(is.na(T2D_diagnosis_date) | (T2D_diagnosis_date < pmin(AID_date, death_date, end_of_study, na.rm =T))) |>
   mutate(
     death_date = case_when(
             !is.na(T2D_diagnosis_date) ~ T2D_diagnosis_date + rexp(n(), rate = death_IRR * death_rate  * 1.5^high_risk) * 365.25,
@@ -47,21 +47,19 @@ simulate_data <- function(n_t2d = 20000, n_non_t2d = 200000,
     )
   ) |>
   filter(
-    is.na(T2D_diagnosis_date) | 
-    (T2D_diagnosis_date < pmin(AID_date, death_date, end_date, na.rm =T) - post_T2D_quarantine & 
-     T2D_diagnosis_date > birth_date + min_age*365.25)
+    is.na(T2D_diagnosis_date) | T2D_diagnosis_date > birth_date + min_age*365.25
   ) |>
     mutate(
         AID_date = case_when(
             AID_date >= death_date ~ NA,
-            AID_date > end_date ~ NA,
+            AID_date > end_of_study ~ NA,
             TRUE ~ AID_date
         ),
         death_date = case_when( 
-            death_date > end_date ~ NA,
+            death_date > end_of_study ~ NA,
             TRUE ~ death_date
         ),
-        first_event_date = pmin(AID_date, death_date, end_date, na.rm = TRUE),
+        first_event_date = pmin(AID_date, death_date, end_of_study, na.rm = TRUE),
         event = case_when(
             !is.na(AID_date) & AID_date == first_event_date ~ 1,
             !is.na(death_date) & death_date == first_event_date ~ 2,
@@ -73,12 +71,18 @@ simulate_data <- function(n_t2d = 20000, n_non_t2d = 200000,
 }
 
 # Create function to perform matching and calculate follow-up time
-perform_matching <- function(df, match_ratio = 1, post_index_quarantine = 365.25/2, index_delay = 0) {
+perform_matching <- function(df, match_ratio = 1, 
+                             post_matching_quarantine = 365.25/2, 
+                             match_time_delay = 0,
+                             fu_start_delay = 365.25/2) {
   
   df <- df |> mutate(birth_year = as.numeric(format(birth_date, "%Y")))
   
   t2d_group <- df |>
-  filter(!is.na(T2D_diagnosis_date)) |> 
+  filter(!is.na(T2D_diagnosis_date)) |>
+  filter(
+    T2D_diagnosis_date < pmin(AID_date, death_date, end_of_study, na.rm = T) - post_matching_quarantine
+  ) |> 
   mutate(match_group = row_number())
 
   non_t2d_group <- df |> filter(is.na(T2D_diagnosis_date))
@@ -90,15 +94,15 @@ perform_matching <- function(df, match_ratio = 1, post_index_quarantine = 365.25
         t2d_sex         <- .data$sex
         #t2d_birth_year  <- .data$birth_year
         t2d_match_group <- .data$match_group
-        t2d_index_date  <- .data$T2D_diagnosis_date + index_delay
         t2d_birth_date  <- .data$birth_date
+        matching_date  <- .data$T2D_diagnosis_date + match_time_delay
 
 
         output <- non_t2d_group |>
           filter(
             sex == t2d_sex,
             birth_date |> between(t2d_birth_date - 365.25, t2d_birth_date + 365.25),
-            first_event_date > t2d_index_date + post_index_quarantine
+            first_event_date > matching_date + post_matching_quarantine
           ) |>
           mutate(diff_birth = {
             abs(as.numeric(birth_date - t2d_birth_date))
@@ -124,13 +128,13 @@ perform_matching <- function(df, match_ratio = 1, post_index_quarantine = 365.25
     arrange(match_group, id) |>
     group_by(match_group) |>
     mutate(
-      index_date = df$T2D_diagnosis_date[match_group] + index_delay,
-      tte = difftime(first_event_date, index_date + post_index_quarantine, units = "days") |> as.numeric()
+      index_date = df$T2D_diagnosis_date[match_group] + match_time_delay,
+      tte = difftime(first_event_date, index_date + fu_start_delay, units = "days") |> as.numeric()
     ) |> 
     filter(n() > 1) |>
     ungroup()
 
-  return(matched_data)
+  matched_data
 }
 
 
@@ -145,37 +149,37 @@ get_coef <- function(df) {
 handlers(handler_progress())
 
 run_all <- function(replication_no = 1, n_t2d = 20000, n_non_t2d = 200000, 
-                    match_ratio = 1, post_index_quarantine = 365.25/2, index_delay = 0, 
-                    prog = NULL) {
+                    match_ratio = 1, post_matching_quarantine = 365.25/2, match_time_delay = 0, fu_start_delay = 365.25/2, prog = NULL) {
   
   #cat("\nReplication no.: ", replication_no, "\n")
   df <- simulate_data(n_t2d, n_non_t2d)
-  matched_df <- perform_matching(df, match_ratio, post_index_quarantine = post_index_quarantine, index_delay = index_delay)
+  matched_df <- perform_matching(df, match_ratio, post_matching_quarantine = post_matching_quarantine, match_time_delay = match_time_delay, fu_start_delay = fu_start_delay)
   if (!is.null(prog)) prog(sprintf(": Iteration number %d completed from total of %d completions (note: completions are not ordered)", replication_no, iterations))
   get_coef(matched_df)
 }
 
 # Run a single replication
-run_all(n_t2d = 10000, n_non_t2d = 100000, match_ratio = 1, post_index_quarantine = 365.25/2, index_delay = 0)
+run_all(n_t2d = 10000, n_non_t2d = 100000)
 
 
-#zz <- simulate_data(10000,100000) |> perform_matching(match_ratio = 1, post_index_quarantine = 365.25/2, index_delay = 0)
+#zz <- simulate_data(10000,100000) |> perform_matching(match_ratio = 1, post_matching_quarantine = 365.25/2, match_time_delay = 0)
 #glm(event == 1 ~ !is.na(T2D_diagnosis_date), family = poisson, offset = log(tte |> as.numeric()), data = zz) |> summary()
 
 # Time complexity test: Run repeated simulations and measure time taken for different numbers of T2D cases
 timed <- function(n, n2 = NULL) {
   if (is.null(n2)) n2 <- n * 10
   tic()
-  run_all(n_t2d = n, n_non_t2d = n2, match_ratio = 1, post_index_quarantine = 365.25/2, index_delay = 0)
+  run_all(n_t2d = n, n_non_t2d = n2, match_ratio = 1, post_matching_quarantine = 365.25/2, match_time_delay = 0)
   cat("\n")
   z <- toc()
   time <- list()
   time[as.character(n)] <- as.numeric(z$toc - z$tic)
-  return(time)
+  time
 }
 
 #b <- lapply(c(20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000), timed)
-b |> unlist() |>
+b |> 
+  unlist() |>
   enframe(name = "n_t2d", value = "time_seconds") |>
   mutate(n_t2d = as.numeric(n_t2d)) |>
   ggplot(aes(x = n_t2d, y = time_seconds)) +
@@ -192,14 +196,14 @@ b |> unlist() |>
 
 # Parallelize the simulation using furrr
 plan(multisession)
-iterations <- 20
+iterations <- 100
 
 with_progress({
   tic()
   p <- progressor(iterations)
   iterate_sim_early_match <- future_map(
-    1:iterations, run_all,
-    n_t2d = 10000, n_non_t2d = 100000, match_ratio = 1, post_index_quarantine = 365.25/2, index_delay = 0, prog = p,
+    1:iterations, run_all, 
+    n_t2d = 10000, n_non_t2d = 100000, match_ratio = 1, post_matching_quarantine = 365.25/2, match_time_delay = 0, prog = p,
     .options = furrr_options(seed = TRUE, chunk_size = 1)
   )
   toc()
@@ -210,11 +214,27 @@ with_progress({
   p <- progressor(iterations)
   iterate_sim_late_match <- future_map(
     1:iterations, run_all,
-    n_t2d = 10000, n_non_t2d = 100000, match_ratio = 1, post_index_quarantine = 0, index_delay = 365.25/2, prog = p,
+    n_t2d = 10000, n_non_t2d = 100000, match_ratio = 1, post_matching_quarantine = 0, match_time_delay = 365.25/2, prog = p,
     .options = furrr_options(seed = TRUE, chunk_size = 1)
   )
   toc()
 })
+
+
+with_progress({
+  tic()
+  p <- progressor(iterations)
+  iterate_sim_fu_with_immortal_time <- future_map(
+    1:iterations, run_all,
+    n_t2d = 10000, n_non_t2d = 100000, match_ratio = 1, post_matching_quarantine = 0, match_time_delay = 0, fu_start_delay = 0, prog = p,
+    .options = furrr_options(seed = TRUE, chunk_size = 1)
+  )
+  toc()
+})
+
+# Mean and sd of coefficients for early and late matching
+iterate_sim_early_match |> unlist() |> (\(x) c(mean = mean(x) |> round(3), sd = sd(x) |> round(3), se = (sd(x)/sqrt(length(x))) |> round(3), conf.int = sprintf("%.3f - %.3f", mean(x) - 1.96 * sd(x)/sqrt(length(x)), mean(x) + 1.96 * sd(x)/sqrt(length(x)))))()
+iterate_sim_late_match |> unlist() |> (\(x) c(mean = mean(x) |> round(3), sd = sd(x) |> round(3), se = (sd(x)/sqrt(length(x))) |> round(3), conf.int = sprintf("%.3f - %.3f", mean(x) - 1.96 * sd(x)/sqrt(length(x)), mean(x) + 1.96 * sd(x)/sqrt(length(x)))))()
 
 
 # Create function to plot density of coefficients
@@ -233,10 +253,15 @@ plot_density <- function(list, title = "Density of Simulated Coefficients") {
 # Plot density of coefficients for early and late matching
 d1 <- plot_density(iterate_sim_early_match, title = "Density of Simulated Coefficients for Early Matching")
 d2 <- plot_density(iterate_sim_late_match, title = "Density of Simulated Coefficients for Late Matching")
+d3 <- plot_density(iterate_sim_fu_with_immortal_time, title = "Density of Simulated Coefficients for Follow-up with Immortal Time")
 
 d1
 d2
 
+
+sd(iterate_sim_early_match |> unlist())
+sd(iterate_sim_late_match |> unlist())
+
 # Save plots to files
-ggsave("cohort_matching/density_early_matching2.png", plot = d1, width = 8, height = 6)
-ggsave("cohort_matching/density_late_matching2.png", plot = d2, width = 8, height = 6)
+ggsave("cohort_matching/density_early_matching.png", plot = d1, width = 8, height = 6)
+ggsave("cohort_matching/density_late_matching.png", plot = d2, width = 8, height = 6)
