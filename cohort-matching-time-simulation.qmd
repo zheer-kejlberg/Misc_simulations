@@ -1,15 +1,32 @@
-#### Simulation to evaluate the correct time-zero for matching and follow-up in a matched cohort study ####
+---
+title: "Cohort matching and immortal time bias simulation"
+format: pdf
+author:
+  - name: "Zheer Kejlberg Al-Mashhadi"
+    affiliation: "Steno Diabetes Center Aarhus"
+---
+
+# Simulation to evaluate the correct time-zero for matching and follow-up in a matched cohort study 
+
+  
+  
+
 
 # Load libraries
+```{r}
 library(tidyverse)
 library(furrr)
 library(progressr)
 library(tictoc)
+```
 
-# Set seed for reproducibility
+Set seed for reproducibility
+```{r}
 set.seed(123) 
+```
 
 # Create function to simulate data
+```{r}
 simulate_data <- function(n_t2d = 10000, n_non_t2d = 100000,
                           start_date = as.Date('2012-01-01'), 
                           end_date = as.Date('2024-12-31'),
@@ -32,8 +49,8 @@ simulate_data <- function(n_t2d = 10000, n_non_t2d = 100000,
         sample(seq(as.Date('1950-01-01'), as.Date('1979-12-31'), by="day"), n_non_t2d, replace=T)
     ), # Uniform random birth dates
     
-    AID_date = birth_date + 20*365.25 + rexp(n, rate = aid_rate * 2^high_risk) * 365.25, # Time to AID diagnosis follows an exponential distribution
-    death_date = birth_date + 50*365.25 + rexp(n, rate = death_rate * 2^high_risk) * 365.25 # Time to death follows an exponential distribution
+    AID_date = birth_date + 20*365.25 + rexp(n, rate = aid_rate * 1.5^high_risk) * 365.25, # Time to AID diagnosis follows an exponential distribution
+    death_date = birth_date + 50*365.25 + rexp(n, rate = death_rate * 1.5^high_risk) * 365.25 # Time to death follows an exponential distribution
   ) |>
   mutate(
     T2D_diagnosis_date = case_when(
@@ -41,15 +58,14 @@ simulate_data <- function(n_t2d = 10000, n_non_t2d = 100000,
       TRUE ~ T2D_diagnosis_date
     )
   ) |>
-  #filter(is.na(T2D_diagnosis_date) | (T2D_diagnosis_date < pmin(AID_date, death_date, end_of_study, na.rm =T))) |>
   mutate(
     death_date = case_when(
-            !is.na(T2D_diagnosis_date) ~ T2D_diagnosis_date + rexp(n(), rate = death_IRR * death_rate  * 2^high_risk) * 365.25,
+            !is.na(T2D_diagnosis_date) ~ T2D_diagnosis_date + rexp(n(), rate = death_IRR * death_rate  * 1.5^high_risk) * 365.25,
             TRUE ~ death_date
     ),
 
     AID_date = case_when(
-            !is.na(T2D_diagnosis_date) ~ T2D_diagnosis_date + rexp(n(), rate = aid_IRR * aid_rate * 2^high_risk) * 365.25,
+            !is.na(T2D_diagnosis_date) ~ T2D_diagnosis_date + rexp(n(), rate = aid_IRR * aid_rate * 1.5^high_risk) * 365.25,
             TRUE ~ AID_date
     )
   ) |>
@@ -77,8 +93,10 @@ simulate_data <- function(n_t2d = 10000, n_non_t2d = 100000,
   data
 }
 
+```
 
-# Create function to perform matching and calculate follow-up time
+# Create function to perform matching and compute time to event / outcome status
+```{r}
 perform_matching <- function(df, match_ratio = 1, 
                              post_matching_quarantine = 365.25/2, 
                              match_time_delay = 0,
@@ -146,17 +164,18 @@ perform_matching <- function(df, match_ratio = 1,
 
   matched_data
 }
-
+```
 
 # Create function to fit Poisson regression and extract coefficient
+```{r}
 get_coef <- function(df) {
-  df <- df |> mutate(event = as.numeric(event == 1))
-  poisson_res <- glm(event ~ !is.na(T2D_diagnosis_date), family = poisson, offset = log(tte |> as.numeric()), data = df)
+  poisson_res <- glm(event == 1 ~ !is.na(T2D_diagnosis_date), family = poisson, offset = log(tte |> as.numeric()), data = df)
   poisson_res$coefficients[2] |> exp() |> round(3)
 }
-
+```
 
 # Create function to run the entire simulation process
+```{r}
 handlers(handler_progress())
 
 run_all <- function(replication_no = 1, n_t2d = 20000, n_non_t2d = 200000, 
@@ -169,14 +188,20 @@ run_all <- function(replication_no = 1, n_t2d = 20000, n_non_t2d = 200000,
   toc()
   get_coef(matched_df)
 }
-
+```
 
 # Run a single replication
+```{r}
+#| eval: false
+
 run_all(n_t2d = 10000, n_non_t2d = 100000)
 run_all(n_t2d = 10000, n_non_t2d = 100000, match_ratio = 1, post_matching_quarantine = 365.25/2, match_time_delay = 0, fu_start_delay = 0)
-
+```
 
 # Time complexity test: Run repeated simulations and measure time taken for different numbers of T2D cases
+```{r}
+#| eval: false
+
 timed <- function(n, n2 = NULL) {
   if (is.null(n2)) n2 <- n * 10
   tic()
@@ -198,12 +223,18 @@ time_complexity <- times |>
   geom_point() +
   labs(title = "Time taken for simulation by number of T2D cases",
        x = "Number of T2D cases",
-       y = "Time taken (seconds") +
+       y = "Time taken (seconds)") +
   theme_minimal() + 
   geom_smooth(aes(x = n_t2d, y = time_seconds), formula = y ~ x * log(x), method = "lm", se = FALSE) #linear regression line
 time_complexity
+```
+
+![](cohort_matching/3. time_complexity.png)
 
 # Parallelize the simulation using furrr
+```{r}
+#| eval: false
+
 plan(multisession)
 iterations <- 100
 n_t2d <- 10000
@@ -231,33 +262,25 @@ with_progress({
   toc()
 })
 
+```
 
-run_all(n_t2d = n_t2d, n_non_t2d = n_non_t2d, post_matching_quarantine = 365.25/2, match_time_delay = 0, fu_start_delay = 0)
+# Compute mean and sd of coefficients for early and late matching
+```{r}
+#| eval: false
 
-# Mean and sd of coefficients for early and late matching
 iterate_sim_early_match |> unlist() |> (\(x) c(mean = mean(x) |> round(3), sd = sd(x) |> round(3), se = (sd(x)/sqrt(length(x))) |> round(3), conf.int = sprintf("%.3f - %.3f", mean(x) - 1.96 * sd(x)/sqrt(length(x)), mean(x) + 1.96 * sd(x)/sqrt(length(x)))))()
 iterate_sim_late_match |> unlist() |> (\(x) c(mean = mean(x) |> round(3), sd = sd(x) |> round(3), se = (sd(x)/sqrt(length(x))) |> round(3), conf.int = sprintf("%.3f - %.3f", mean(x) - 1.96 * sd(x)/sqrt(length(x)), mean(x) + 1.96 * sd(x)/sqrt(length(x)))))()
+```
 
-## Bootstrap confidence intervals for comparison
-boot <- function(x, n_boot = 10000) {
-    x <- unlist(x)
-    resample <- function(i, x) sample(x, size = length(x), replace = TRUE) |> mean()
-    vec <- sapply(1:n_boot, resample, x)
-    c(mean = mean(vec), q25 = quantile(vec, 0.025), q975 = quantile(vec, 0.975))
-}
-boot(iterate_sim_early_match)
-boot(iterate_sim_late_match)
-
-
-# Create function to plot density of coefficients
+# Create function to plot distribution of coefficients
+```{r}
 plot_density <- function(list, title = "Density of Simulated Coefficients") {
   df <- tibble(coef = list |> unlist())
   
-  ci_df <- data.frame(
-    mean = mean(unlist(list)),
+    ci_df <- data.frame(
     xmin = mean(unlist(list)) - 1.96 * sd(unlist(list)) / sqrt(length(unlist(list))),
     xmax = mean(unlist(list)) + 1.96 * sd(unlist(list)) / sqrt(length(unlist(list)))
-  )
+    )
 
   ggplot(df, aes(x = coef)) +
     geom_density(fill = "lightblue", alpha = 0.5) +
@@ -268,20 +291,34 @@ plot_density <- function(list, title = "Density of Simulated Coefficients") {
     theme_minimal() + 
     geom_vline(xintercept = 1.2, color = "black", linetype = "dashed") + # ground truth line at 1.2 for AID
     annotate("text", x = 1.2, y = 0, label = "Ground Truth: 1.2", color = "black", vjust = -1, hjust = 0, angle = 90) + # Add text annotation for ground truth
-    annotate("text", x = (ci_df$mean + 0.015), y = 0, label = sprintf("Estimate: %.3f (%.3f - %.3f)", ci_df$mean, ci_df$xmin, ci_df$xmax), color = "red", vjust = -1, hjust = 0, angle = 90) + # Add text annotation for mean coefficient
+    annotate("text", x = (mean(list |> unlist()) + 0.015), y = 0, label = sprintf("Estimate: %.3f (%.3f - %.3f)", mean(list |> unlist()), mean(list |> unlist()) - 1.96 * sd(list |> unlist())/sqrt(length(list |> unlist())), mean(list |> unlist()) + 1.96 * sd(list |> unlist())/sqrt(length(list |> unlist()))), color = "red", vjust = -1, hjust = 0, angle = 90) + # Add text annotation for mean coefficient
     # add confidence band around the mean coefficient
     geom_rect(data = ci_df, aes(xmin = xmin, xmax = xmax, ymin = 0, ymax = Inf), fill = "red", alpha = 0.2, inherit.aes = FALSE)
 }
+```
 
-# Plot density of coefficients for early and late matching
+# Plot empirical coefficient density for different matching strategies
+```{r}
+#| eval: false
+
 d1 <- plot_density(iterate_sim_early_match, title = sprintf("Density of Simulated Coefficients for Early Matching (%d iterations)", iterations))
 d2 <- plot_density(iterate_sim_late_match, title = sprintf("Density of Simulated Coefficients for Late Matching (%d iterations)", iterations))
 
+
 d1
 d2
+```
+
+![](cohort_matching/1. density_early_matching.png)
+
+![](cohort_matching/2. density_late_matching.png)
 
 # Save plots to files
+```{r}
+#| eval: false
+
 ggsave("cohort_matching/1. density_early_matching.png", plot = d1, width = 8, height = 6)
 ggsave("cohort_matching/2. density_late_matching.png", plot = d2, width = 8, height = 6)
 
 ggsave("cohort_matching/3. time_complexity.png", plot = time_complexity, width = 8, height = 6)
+```
