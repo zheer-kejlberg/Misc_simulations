@@ -9,6 +9,13 @@ library(tictoc)
 # Set seed for reproducibility
 set.seed(123) 
 
+# Create function to rescale exponential random variables to a specific range
+rescale_exp <- function(x, min_val, max_val) {
+  rescaled <- (x - min(x)) / (max(x) - min(x))
+  rescaled <- rescaled * (max_val - min_val) + min_val
+  rescaled
+}
+
 # Create function to simulate data
 simulate_data <- function(n_t2d = 10000, n_non_t2d = 100000,
                           start_date = as.Date('2012-01-01'), 
@@ -28,8 +35,9 @@ simulate_data <- function(n_t2d = 10000, n_non_t2d = 100000,
     ), # Uniform random T2D diagnosis dates for T2D group, NA for non-T2D group
     high_risk = rbinom(n, 1, 0.3 + 0.15 * !is.na(T2D_diagnosis_date)), # Random high-risk status
     birth_date = c(
-        T2D_diagnosis_date[1:n_t2d] - 44*365.25 - (rexp(n_t2d, rate = 1) |> (\(x) x / max(x) * 26 * 365.25)()), # Random birth dates for T2D group with exponentially distributed age at diagnosis after age 44, scaled to a maximum of 26 years
-        sample(seq(as.Date('1950-01-01'), as.Date('1979-12-31'), by="day"), n_non_t2d, replace=T)
+        #T2D_diagnosis_date[1:n_t2d] - 44*365.25 - (rexp(n_t2d, rate = 1) |> (\(x) x / max(x) * 26 * 365.25)()), # Random birth dates for T2D group with exponentially distributed age at diagnosis after age 44, scaled to a maximum of 26 years
+        T2D_diagnosis_date[1:n_t2d] - rescale_exp(rexp(n_t2d, rate = 1), 44, 70)*365.25, # Random birth dates for T2D group with exponentially distributed age at diagnosis after age 44, scaled to a maximum of 26 years
+        sample(seq(as.Date('1940-01-01'), as.Date('1980-12-31'), by="day"), n_non_t2d, replace=T)
     ), # Uniform random birth dates
     
     AID_date = birth_date + 20*365.25 + rexp(n, rate = aid_rate * 2^high_risk) * 365.25, # Time to AID diagnosis follows an exponential distribution
@@ -77,6 +85,8 @@ simulate_data <- function(n_t2d = 10000, n_non_t2d = 100000,
   data
 }
 
+z <- \(x) simulate_data(10000,100000) |> filter(!is.na(T2D_diagnosis_date)) |> nrow()
+sapply(1:100, z) |> mean()
 
 # Create function to perform matching and calculate follow-up time
 perform_matching <- function(df, match_ratio = 1, 
@@ -87,8 +97,8 @@ perform_matching <- function(df, match_ratio = 1,
   df <- df |> mutate(birth_year = as.numeric(format(birth_date, "%Y")))
   
   t2d_group <- df |>
-  filter(!is.na(T2D_diagnosis_date)) |>
   filter(
+    !is.na(T2D_diagnosis_date),
     T2D_diagnosis_date < pmin(AID_date, death_date, end_of_study, na.rm = T) - post_matching_quarantine
   ) |> 
   mutate(match_group = row_number())
@@ -113,12 +123,11 @@ perform_matching <- function(df, match_ratio = 1,
             first_event_date > matching_date + post_matching_quarantine,
             is.na(T2D_diagnosis_date) | T2D_diagnosis_date > matching_date + post_matching_quarantine
           ) |>
-          mutate(diff_birth = {
-            first_event_date = pmin(first_event_date, T2D_diagnosis_date)
-            abs(as.numeric(birth_date - t2d_birth_date))
-          }) |>
-          arrange(diff_birth) |>          
-          slice_sample(n = match_ratio) |>
+          mutate(
+            #first_event_date = pmin(first_event_date, T2D_diagnosis_date),
+            diff_birth = abs(as.numeric(birth_date - t2d_birth_date))
+          ) |>
+          slice_min(diff_birth, n = match_ratio) |>
           pull(id)
 
           cat(sprintf("\rProgress: %d/%d = %.3f%%", t2d_match_group, nrow(t2d_group), 100*t2d_match_group / nrow(t2d_group)))  # Print the number of potential matches for debugging
@@ -131,11 +140,14 @@ perform_matching <- function(df, match_ratio = 1,
     unnest(matched_controls) |>  
     mutate(matched_controls = unlist(matched_controls)) |>
     left_join(df, by = c("matched_controls" = "id")) |>
-    rename(id = matched_controls)
+    rename(id = matched_controls) |>
+    mutate(
+        first_event_date = pmin(first_event_date, T2D_diagnosis_date, na.rm=TRUE)
+    )
 
   matched_data <- t2d_group |>
     bind_rows(controls) |>
-    arrange(match_group, id) |>
+    #arrange(match_group, id) |>
     group_by(match_group) |>
     mutate(
       matching_date = t2d_group$T2D_diagnosis_date[match_group] + match_time_delay,
@@ -152,7 +164,14 @@ perform_matching <- function(df, match_ratio = 1,
 get_coef <- function(df) {
   df <- df |> mutate(event = as.numeric(event == 1))
   poisson_res <- glm(event ~ !is.na(T2D_diagnosis_date), family = poisson, offset = log(tte |> as.numeric()), data = df)
-  poisson_res$coefficients[2] |> exp() |> round(3)
+  log_irr <- poisson_res$coefficients[2] |> unname() #|> exp() |> round(3)
+  se_log_irr <- summary(poisson_res)$coefficients[2, 2]
+  list(log_irr = log_irr, se_log_irr = se_log_irr)
+}
+
+# Create function to extract just the IRR coefficient from the coef output
+get_irr <- function(coef_output) {
+  exp(coef_output$log_irr)
 }
 
 
@@ -172,7 +191,7 @@ run_all <- function(replication_no = 1, n_t2d = 20000, n_non_t2d = 200000,
 
 
 # Run a single replication
-run_all(n_t2d = 10000, n_non_t2d = 100000)
+run_all(n_t2d = 1000, n_non_t2d = 10000)
 run_all(n_t2d = 10000, n_non_t2d = 100000, match_ratio = 1, post_matching_quarantine = 365.25/2, match_time_delay = 0, fu_start_delay = 0)
 
 
@@ -207,7 +226,7 @@ time_complexity
 plan(multisession)
 iterations <- 100
 n_t2d <- 10000
-n_non_t2d <- 100000
+n_non_t2d <- 20000
 
 with_progress({
   tic()
@@ -232,32 +251,63 @@ with_progress({
 })
 
 
-run_all(n_t2d = n_t2d, n_non_t2d = n_non_t2d, post_matching_quarantine = 365.25/2, match_time_delay = 0, fu_start_delay = 0)
 
-# Mean and sd of coefficients for early and late matching
-iterate_sim_early_match |> unlist() |> (\(x) c(mean = mean(x) |> round(3), sd = sd(x) |> round(3), se = (sd(x)/sqrt(length(x))) |> round(3), conf.int = sprintf("%.3f - %.3f", mean(x) - 1.96 * sd(x)/sqrt(length(x)), mean(x) + 1.96 * sd(x)/sqrt(length(x)))))()
-iterate_sim_late_match |> unlist() |> (\(x) c(mean = mean(x) |> round(3), sd = sd(x) |> round(3), se = (sd(x)/sqrt(length(x))) |> round(3), conf.int = sprintf("%.3f - %.3f", mean(x) - 1.96 * sd(x)/sqrt(length(x)), mean(x) + 1.96 * sd(x)/sqrt(length(x)))))()
 
-## Bootstrap confidence intervals for comparison
-boot <- function(x, n_boot = 10000) {
-    x <- unlist(x)
-    resample <- function(i, x) sample(x, size = length(x), replace = TRUE) |> mean()
-    vec <- sapply(1:n_boot, resample, x)
-    c(mean = mean(vec), q25 = quantile(vec, 0.025), q975 = quantile(vec, 0.975))
+# Create function to perform meta-analysis on the coefficients
+meta_analyse <- function(list_of_results) {
+  log_irr <- sapply(list_of_results, function(x) x$log_irr)
+  se_log_irr <- sapply(list_of_results, function(x) x$se_log_irr)
+  
+  # Calculate weights for each study (inverse of variance)
+  weights <- 1 / (se_log_irr^2)
+  
+  # Calculate the weighted mean of log IRR
+  weighted_mean_log_irr <- sum(weights * log_irr) / sum(weights)
+  
+  # Calculate the standard error of the weighted mean
+  se_weighted_mean_log_irr <- sqrt(1 / sum(weights))
+  
+  # Calculate the 95% confidence interval
+  ci_lower <- weighted_mean_log_irr - 1.96 * se_weighted_mean_log_irr
+  ci_upper <- weighted_mean_log_irr + 1.96 * se_weighted_mean_log_irr
+  
+  data.frame(
+    mean = exp(weighted_mean_log_irr),
+    xmin = exp(ci_lower),
+    xmax = exp(ci_upper)
+  )
 }
-boot(iterate_sim_early_match)
-boot(iterate_sim_late_match)
 
+library(metafor)
+meta_analyse2 <- function(list_of_results) {
+  log_irr <- sapply(list_of_results, function(x) x$log_irr)
+  se_log_irr <- sapply(list_of_results, function(x) x$se_log_irr)
+  
+  # Perform random-effects meta-analysis using the 'metafor' package
+  res <- rma(yi = log_irr, sei = se_log_irr, method = "REML")
+  
+  data.frame(
+    mean = exp(res$b),
+    xmin = exp(res$ci.lb),
+    xmax = exp(res$ci.ub)
+  )
+}
+
+iterate_sim_late_match |> meta_analyse() #|> print()
+iterate_sim_late_match |> meta_analyse2() #|> print()
 
 # Create function to plot density of coefficients
 plot_density <- function(list, title = "Density of Simulated Coefficients") {
-  df <- tibble(coef = list |> unlist())
+  IRRs <- list |> sapply(function(x) x$log_irr) |> exp()
+  df <- tibble(coef = IRRs)
   
-  ci_df <- data.frame(
-    mean = mean(unlist(list)),
-    xmin = mean(unlist(list)) - 1.96 * sd(unlist(list)) / sqrt(length(unlist(list))),
-    xmax = mean(unlist(list)) + 1.96 * sd(unlist(list)) / sqrt(length(unlist(list)))
-  )
+  #ci_df <- data.frame(
+  #  mean = mean(unlist(list)),
+  #  xmin = mean(unlist(list)) - 1.96 * sd(unlist(list)) / sqrt(length(unlist(list))),
+  #  xmax = mean(unlist(list)) + 1.96 * sd(unlist(list)) / sqrt(length(unlist(list)))
+  #)
+
+  ci_df <- list |> meta_analyse2()
 
   ggplot(df, aes(x = coef)) +
     geom_density(fill = "lightblue", alpha = 0.5) +
